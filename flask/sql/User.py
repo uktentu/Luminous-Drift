@@ -20,16 +20,26 @@ class User:
         salt: bytes = None,
         hashed_password: bytes = None
     ):
+        # Validate required fields
+        if not all([firstName, lastName, username, email]):
+            raise UserError("All fields are required")
+        
         self.firstName = firstName
         self.lastName = lastName
         self.username = username
         self.email = email
         self.admin = admin
         self.is_active = is_active
+        self.salt = salt
         
         if password:
             self.salt = self._generate_salt() if salt is None else salt
-            self.password = self._hash_password(password, self.salt)[0] if hashed_password is None else hashed_password
+            self.password, _ = self._hash_password(password, self.salt)
+        elif hashed_password and salt:
+            self.password = hashed_password
+            self.salt = salt
+        else:
+            raise UserError("Either password or (hashed_password, salt) must be provided")
         
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -54,6 +64,12 @@ class User:
         salted_password = password_bytes + salt
         hashed_password = hashlib.sha256(salted_password).digest()
         return base64.b64encode(hashed_password), salt
+    
+    def authenticate(self, password: str) -> bool:
+        if not hasattr(self, 'salt') or not hasattr(self, 'password'):
+            return False
+        new_hash, _ = self._hash_password(password, self.salt)
+        return secrets.compare_digest(self.password, new_hash)
 
 class UserDB:
     def __init__(self, db_name: str = 'users.db'):
@@ -156,3 +172,30 @@ class UserDB:
                     admin=bool(row[4]), is_active=bool(row[5])
                 ) for row in rows
             ]
+    
+    def authenticate_user(self, username: str, password: str) -> Optional[User]:
+        user = self.get_user_by_username(username)
+        if not user:
+            return None
+        
+        try:
+            if user.authenticate(password):
+                return user
+        except Exception:
+            return None
+        return None
+
+    def update_password(self, username: str, new_password: str) -> None:
+        user = self.get_user_by_username(username)
+        if not user:
+            raise UserError("User not found")
+        
+        salt = User._generate_salt()
+        hashed_password, _ = User._hash_password(new_password, salt)
+        
+        with self._get_connection() as conn:
+            conn.execute('''
+                UPDATE users 
+                SET password = ?, salt = ?
+                WHERE username = ?
+            ''', (hashed_password, salt, username))
